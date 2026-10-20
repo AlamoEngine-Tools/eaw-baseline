@@ -1,0 +1,92 @@
+name: Prepare Release
+
+# Step 1 of a baseline release, the same two-step shape as the schema and server repositories:
+# opens the version-bump pull request against the branch it was run from. Merge the PR, then run
+# "Release" (release.yml) from the Actions tab on that branch.
+#
+# Nothing publishes on push. Servers read the newest GitHub release whose MAJOR is the DTO version
+# they read and never a branch, so a rebuilt baseline waits on a branch until a release is cut.
+# The tag is v<MAJOR>.<MINOR>.<PATCH>: MAJOR is the DTO version (the manifest's schemaVersion),
+# MINOR the FoC manifest's version, PATCH counts rebuilds at those two numbers. A pull request
+# opened with GITHUB_TOKEN starts no workflows, so this PR shows no checks; "Release" validates
+# everything before it publishes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, MAJOR.MINOR.PATCH (DTO version, FoC manifest version, rebuild)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    name: Open version bump PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The version arrives through the environment, never spliced into the command.
+      - name: Check the version is new and matches the manifests
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ $VERSION =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::Version must be MAJOR.MINOR.PATCH: '$VERSION'"
+            exit 1
+          fi
+          major=${BASH_REMATCH[1]}
+          minor=${BASH_REMATCH[2]}
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::v$VERSION is already released"
+            exit 1
+          fi
+          if git ls-remote --exit-code --heads origin "release/v$VERSION" >/dev/null; then
+            echo "::error::Branch release/v$VERSION already exists - merge or delete its PR first"
+            exit 1
+          fi
+          previous=$(jq -r '.version' release.json)
+          if [[ $previous == "$VERSION" ]]; then
+            echo "::error::release.json already says $VERSION"
+            exit 1
+          fi
+          for game in eaw foc; do
+            dto=$(jq -r '.schemaVersion // empty' "$game/aet-pg-swg-lsp-$game-baseline.manifest.json")
+            if [ -n "$dto" ] && [ "$dto" != "$major" ]; then
+              echo "::error::$game manifest has schemaVersion $dto, but MAJOR is $major"
+              exit 1
+            fi
+          done
+          version=$(jq -r '.version' foc/aet-pg-swg-lsp-foc-baseline.manifest.json)
+          if [ "$version" != "$minor" ]; then
+            echo "::error::foc manifest has version $version, but MINOR is $minor"
+            exit 1
+          fi
+          echo "PREVIOUS=$previous" >>"$GITHUB_ENV"
+
+      - name: Bump and open the PR
+        env:
+          VERSION: ${{ inputs.version }}
+          BASE: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '{ "version": "%s" }\n' "$VERSION" >release.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "release/v$VERSION"
+          git commit -am "chore: release v$VERSION"
+          git push origin "release/v$VERSION"
+          gh pr create --base "$BASE" --head "release/v$VERSION" --title "Release v$VERSION" --body "$(printf '%s\n' \
+            "Baseline release version bump $PREVIOUS -> $VERSION in \`release.json\`." \
+            "" \
+            "After merging, run **Release** from the Actions tab on \`$BASE\`." \
+            "" \
+            "No CI checks on this PR: pull requests opened by GITHUB_TOKEN start no workflows. Release validates the baselines first.")"
