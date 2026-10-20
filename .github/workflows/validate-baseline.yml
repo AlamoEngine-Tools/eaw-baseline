@@ -1,0 +1,83 @@
+name: Validate baseline
+
+# Every baseline file matches its manifest, and - when a tag is given - the tag matches the
+# numbers the manifests carry. Runs on every pull request and from the release workflow.
+#
+#   hash       sha256 of each <game>/aet-pg-swg-lsp-<game>-baseline.aet equals the manifest's hash
+#   tag        v<MAJOR>.<MINOR>.<PATCH>: MAJOR is the manifest's schemaVersion (the DTO version a
+#              server has to read to load the file; manifests without the field are not checked),
+#              MINOR is the FoC manifest's version (the file servers read), PATCH counts rebuilds
+
+on:
+  pull_request:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag to check the manifests against, empty for none
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check every baseline against its manifest
+        run: |
+          status=0
+          for game in eaw foc; do
+            file="$game/aet-pg-swg-lsp-$game-baseline.aet"
+            manifest="$game/aet-pg-swg-lsp-$game-baseline.manifest.json"
+            if [ ! -f "$file" ] || [ ! -f "$manifest" ]; then
+              echo "::error::$game: baseline or manifest missing"
+              status=1
+              continue
+            fi
+            expected=$(jq -r '.hash' "$manifest")
+            actual=$(sha256sum "$file" | cut -d' ' -f1)
+            if [ "$expected" != "$actual" ]; then
+              echo "::error file=$manifest::hash $expected does not match $file ($actual)"
+              status=1
+            else
+              echo "$game: hash matches" >>"$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          exit $status
+
+      - name: Check the tag against the manifests
+        if: inputs.tag != ''
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! [[ $TAG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::Tag must be vMAJOR.MINOR.PATCH: '$TAG'"
+            exit 1
+          fi
+          major=${BASH_REMATCH[1]}
+          minor=${BASH_REMATCH[2]}
+          status=0
+          for game in eaw foc; do
+            manifest="$game/aet-pg-swg-lsp-$game-baseline.manifest.json"
+            dto=$(jq -r '.schemaVersion // empty' "$manifest")
+            if [ -n "$dto" ] && [ "$dto" != "$major" ]; then
+              echo "::error file=$manifest::schemaVersion $dto, but the tag's MAJOR is $major"
+              status=1
+            fi
+          done
+          version=$(jq -r '.version' foc/aet-pg-swg-lsp-foc-baseline.manifest.json)
+          if [ "$version" != "$minor" ]; then
+            echo "::error file=foc/aet-pg-swg-lsp-foc-baseline.manifest.json::version $version, but the tag's MINOR is $minor"
+            status=1
+          fi
+          if [ $status -eq 0 ]; then
+            echo "$TAG matches the manifests" >>"$GITHUB_STEP_SUMMARY"
+          fi
+          exit $status

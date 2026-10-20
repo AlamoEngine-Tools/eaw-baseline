@@ -1,0 +1,83 @@
+name: Release
+
+# Step 2 of a baseline release, after the bump PR from "Prepare Release" is merged. Run from the
+# Actions tab on the branch that carries the baselines to publish. Servers do not read a branch:
+# they resolve the newest GitHub release whose MAJOR is the DTO version they read and download the
+# files at that tag, so a tag is a promise that never moves. Nothing publishes on push.
+#
+#   guard      v<version> from release.json does not exist yet
+#   validate   every baseline matches its manifest; the tag matches the manifests' numbers
+#   publish    the GitHub release at this commit, the six files attached, generated notes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Version guard
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read the version
+        id: version
+        run: |
+          version=$(jq -r '.version' release.json)
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=release.json::version '$version' is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error::v$version is already released - run Prepare Release for a new version first"
+            exit 1
+          fi
+          echo "tag=v$version" >>"$GITHUB_OUTPUT"
+          echo "Releasing v$version from $GITHUB_REF_NAME" >>"$GITHUB_STEP_SUMMARY"
+
+  validate:
+    name: validate
+    needs: guard
+    uses: ./.github/workflows/validate-baseline.yml
+    with:
+      tag: ${{ needs.guard.outputs.tag }}
+    permissions:
+      contents: read
+
+  publish:
+    name: publish release
+    needs: [guard, validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.guard.outputs.tag }}
+        run: |
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes \
+            eaw/aet-pg-swg-lsp-eaw-baseline.aet \
+            eaw/aet-pg-swg-lsp-eaw-baseline.aet.icons \
+            eaw/aet-pg-swg-lsp-eaw-baseline.manifest.json \
+            foc/aet-pg-swg-lsp-foc-baseline.aet \
+            foc/aet-pg-swg-lsp-foc-baseline.aet.icons \
+            foc/aet-pg-swg-lsp-foc-baseline.manifest.json
